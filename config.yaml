@@ -1,0 +1,54 @@
+project:
+  name: LunarIce-Net
+  seed: 42
+
+data:
+  raw:
+    # TODO: Replace these with your PRADAN/ISRO downloaded dataset paths.
+    # Keep S-band and L-band as separate groups.
+    s_band:
+      hh: "data/raw/dfsar_s_band/HH.tif"
+      hv: "data/raw/dfsar_s_band/HV.tif"
+      vh: "data/raw/dfsar_s_band/VH.tif"
+      vv: "data/raw/dfsar_s_band/VV.tif"
+    l_band:
+      hh: "data/raw/dfsar_l_band/HH.tif"
+      hv: "data/raw/dfsar_l_band/HV.tif"
+      vh: "data/raw/dfsar_l_band/VH.tif"
+      vv: "data/raw/dfsar_l_band/VV.tif"
+    diviner_temperature: "data/raw/diviner/tmax_kelvin.tif"
+    lola_slope: "data/raw/lola/slope_degrees.tif"
+    psr_mask: "data/raw/psr/psr_mask.tif"
+
+  labels:
+    # TODO: Add your training label mask here.
+    # 1 = confirmed/proxy ice pixel, 0 = non-ice/background.
+    train_mask: "data/labels/train_ice_mask.tif"
+
+  processed:
+    feature_stack: "data/processed/features.npy"
+    label_mask: "data/processed/labels.npy"
+    reference_raster: "data/processed/reference.tif"
+
+training:
+  patch_size: 256
+  batch_size: 4
+  epochs: 30
+  learning_rate: 0.0001
+  positive_patch_fraction: 0.6
+  train_split: 0.8
+  num_workers: 0
+  checkpoint_dir: "outputs/checkpoints"
+
+physics_gate:
+  cpr_threshold: 1.0
+  dop_threshold: 0.13
+  slope_threshold_deg: 20.0
+  temperature_threshold_k: 110.0
+
+inference:
+  output_probability_tif: "outputs/maps/ice_probability.tif"
+  output_uncertainty_tif: "outputs/maps/ice_uncertainty.tif"
+  threshold: 0.5
+  mc_dropout_passes: 20
+
