@@ -1,0 +1,192 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import rasterio
+from rasterio.transform import Affine
+
+from lunarice_pds4.config import ensure_parent
+from lunarice_pds4.constants import MOON_PROJ4
+
+
+def write_analysis_stack(
+    path: str | Path,
+    layers: dict[str, np.ndarray],
+    geotransform: tuple[float, float, float, float, float, float] | None,
+) -> None:
+    """Write the final multi-band analysis GeoTIFF."""
+    ensure_parent(path)
+    names = list(layers.keys())
+    first = layers[names[0]]
+    transform = Affine.from_gdal(*geotransform) if geotransform else Affine.identity()
+
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=first.shape[0],
+        width=first.shape[1],
+        count=len(names),
+        dtype="float32",
+        crs=MOON_PROJ4,
+        transform=transform,
+        compress="lzw",
+        predictor=2,
+    ) as dst:
+        for idx, name in enumerate(names, start=1):
+            dst.write(layers[name].astype(np.float32), idx)
+            dst.set_band_description(idx, name)
+
+
+def write_volume_csv(
+    path: str | Path,
+    crater_df: pd.DataFrame,
+    ice_confirmed: np.ndarray,
+    cpr: np.ndarray,
+    dop: np.ndarray,
+    p_odd_fraction: np.ndarray,
+    m_per_pixel: float,
+) -> None:
+    """Estimate ice area/volume per detected crater."""
+    ensure_parent(path)
+    rows = []
+    if crater_df.empty:
+        pd.DataFrame(rows).to_csv(path, index=False)
+        return
+
+    for i, crater in crater_df.iterrows():
+        yy, xx = np.ogrid[: ice_confirmed.shape[0], : ice_confirmed.shape[1]]
+        disk = (xx - crater["pixel_col"]) ** 2 + (yy - crater["pixel_row"]) ** 2 <= crater["radius_px"] ** 2
+        ice_pixels = disk & (ice_confirmed > 0)
+        ice_area = float(ice_pixels.sum() * m_per_pixel**2)
+        crater_area = float(np.pi * crater["radius_m"] ** 2)
+        ice_fraction = ice_area / max(crater_area, 1e-10)
+        depth_est = float(crater["radius_m"] * 0.2)
+        volume = ice_area * depth_est * ice_fraction * 0.3
+        rows.append(
+            {
+                "crater_id": f"CR_{i:04d}",
+                "center_lat": crater.get("center_lat", np.nan),
+                "center_lon": crater.get("center_lon", np.nan),
+                "radius_m": crater["radius_m"],
+                "depth_est_m": depth_est,
+                "ice_area_m2": ice_area,
+                "crater_area_m2": crater_area,
+                "ice_fraction": ice_fraction,
+                "mean_CPR": float(np.nanmean(cpr[ice_pixels])) if ice_pixels.any() else 0.0,
+                "mean_DOP": float(np.nanmean(dop[ice_pixels])) if ice_pixels.any() else 0.0,
+                "mean_P_odd": float(np.nanmean(p_odd_fraction[ice_pixels])) if ice_pixels.any() else 0.0,
+                "ice_volume_m3": volume,
+                "porosity_correction": 0.3,
+                "is_psr": bool(crater.get("is_psr", False)),
+                "is_doubly_shadowed": bool(crater.get("is_doubly_shadowed", False)),
+                "notes": "Primary target" if bool(crater.get("is_doubly_shadowed", False)) and ice_pixels.any() else "",
+            }
+        )
+    pd.DataFrame(rows).to_csv(path, index=False)
+
+
+def write_rover_geojson(path: str | Path, crater_df: pd.DataFrame, max_points: int = 25) -> None:
+    """Create a simple waypoint GeoJSON from best crater centers."""
+    ensure_parent(path)
+    features = []
+    if not crater_df.empty and {"center_lon", "center_lat"}.issubset(crater_df.columns):
+        ranked = crater_df.copy()
+        if "is_doubly_shadowed" in ranked.columns:
+            ranked = ranked.sort_values(["is_doubly_shadowed", "confidence"], ascending=[False, False])
+        else:
+            ranked = ranked.sort_values("confidence", ascending=False)
+        coords = []
+        for i, row in ranked.head(max_points).iterrows():
+            if not np.isfinite(row.get("center_lon", np.nan)) or not np.isfinite(row.get("center_lat", np.nan)):
+                continue
+            coord = [float(row["center_lon"]), float(row["center_lat"])]
+            coords.append(coord)
+            features.append(
+                {
+                    "type": "Feature",
+                    "id": f"WP_{len(coords):03d}",
+                    "geometry": {"type": "Point", "coordinates": coord},
+                    "properties": {
+                        "waypoint_id": f"WP_{len(coords):03d}",
+                        "radius_m": float(row["radius_m"]),
+                        "is_doubly_shadowed": bool(row.get("is_doubly_shadowed", False)),
+                        "confidence": float(row.get("confidence", 0.0)),
+                    },
+                }
+            )
+        if len(coords) >= 2:
+            features.insert(
+                0,
+                {
+                    "type": "Feature",
+                    "id": "rover_traverse_001",
+                    "geometry": {"type": "LineString", "coordinates": coords},
+                    "properties": {
+                        "generated_by": "LunarIce-Net-PDS4",
+                        "num_waypoints": len(coords),
+                    },
+                },
+            )
+
+    geojson = {
+        "type": "FeatureCollection",
+        "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:IAU:2015:30100"}},
+        "features": features,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(geojson, f, indent=2)
+
+
+def write_dashboard(path: str | Path, layers: dict[str, np.ndarray], crater_df: pd.DataFrame) -> None:
+    """Save a 4-panel dashboard PNG for presentation."""
+    ensure_parent(path)
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+
+    fig, axes = plt.subplots(2, 2, figsize=(18, 16), dpi=150)
+    fig.suptitle("Chandrayaan-2 DFSAR + OHRC Lunar Ice Detection\nISRO Hackathon PS-8", fontsize=16, fontweight="bold")
+
+    ohrc = layers.get("OHRC_reflectance", np.zeros_like(layers["CPR"]))
+    axes[0, 0].imshow(ohrc, cmap="gray", vmin=0, vmax=max(float(np.nanpercentile(ohrc, 99)), 1e-6))
+    for _, c in crater_df.iterrows():
+        circle = plt.Circle((c["pixel_col"], c["pixel_row"]), c["radius_px"], color="cyan", fill=False, linewidth=1.2)
+        axes[0, 0].add_patch(circle)
+    axes[0, 0].set_title("OHRC Reflectance + Crater Candidates", fontweight="bold")
+
+    im = axes[0, 1].imshow(layers["CPR"], cmap="turbo", vmin=0, vmax=2)
+    fig.colorbar(im, ax=axes[0, 1], label="CPR")
+    axes[0, 1].set_title("Circular Polarization Ratio", fontweight="bold")
+
+    axes[1, 0].imshow(ohrc, cmap="gray", alpha=0.65)
+    overlay = np.zeros((*layers["ice_confirmed"].shape, 4), dtype=np.float32)
+    overlay[layers["ice_confirmed"] > 0] = [0.0, 0.8, 1.0, 0.75]
+    overlay[layers["hazard_map"] > 0] = [1.0, 0.1, 0.1, 0.55]
+    axes[1, 0].imshow(overlay)
+    axes[1, 0].legend(
+        handles=[mpatches.Patch(color="cyan", label="Confirmed ice"), mpatches.Patch(color="red", label="Hazard")],
+        loc="upper right",
+    )
+    axes[1, 0].set_title("Confirmed Ice + Terrain Hazard", fontweight="bold")
+
+    s1 = layers["S1"] + 1e-10
+    rgb = np.dstack(
+        [
+            np.clip(layers.get("P_even_fraction", 0) / 1.0, 0, 1),
+            np.clip(1 - layers["DOP"], 0, 1),
+            np.clip(layers["P_odd_fraction"], 0, 1),
+        ]
+    )
+    axes[1, 1].imshow(np.clip(rgb * 1.8, 0, 1))
+    axes[1, 1].set_title("m-chi Composite: R=Even, G=Diffuse, B=Volume", fontweight="bold")
+
+    for ax in axes.ravel():
+        ax.set_xlabel("Sample")
+        ax.set_ylabel("Line")
+    plt.tight_layout()
+    plt.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
