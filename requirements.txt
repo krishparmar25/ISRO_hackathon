@@ -1,7 +1,50 @@
-numpy>=1.26
-scipy>=1.11
-rasterio>=1.3
-pyyaml>=6.0
-tqdm>=4.66
-torch>=2.3
+project:
+  name: LunarIce-Net-PDS4
+
+data:
+  pradan:
+    # TODO: Paste your complete PRADAN DFSAR folder inside:
+    #   data/pradan/
+    # Example final path:
+    #   data/pradan/CH2_DFSAR_SOME_ORBIT_FOLDER
+    # That folder should contain data/, geometry/, browse/, miscellaneous/.
+    dfsar_root: "data/pradan/PASTE_DFSAR_FOLDER_NAME_HERE"
+
+    # TODO: Optional. If PRADAN gives a separate second DFSAR frequency folder,
+    # paste it inside data/pradan/ and put its folder name here.
+    # Leave as "" if you only want to process one DFSAR folder first.
+    dfsar_secondary_root: ""
+
+    # TODO: Paste your complete PRADAN OHRC folder inside:
+    #   data/pradan/
+    # Example final path:
+    #   data/pradan/CH2_OHRC_SOME_ORBIT_FOLDER
+    # That folder should contain data/, geometry/, browse/, miscellaneous/.
+    ohrc_root: "data/pradan/PASTE_OHRC_FOLDER_NAME_HERE"
+
+processing:
+  multilook:
+    azimuth_looks: 5
+    range_looks: 5
+  circular_polarization:
+    # If CPR is > 1 almost everywhere on dry terrain, change this to true.
+    invert_s4_sign: false
+  thresholds:
+    cpr: 1.0
+    dop: 0.5
+    volume_fraction: 0.4
+    psr_reflectance: 0.005
+    slope_hazard: 0.6
+    min_ice_area_px: 25
+  ohrc:
+    solar_azimuth_deg: 135.0
+    solar_elevation_deg: 30.0
+    fallback_m_per_pixel: 0.3
+
+outputs:
+  folder: "outputs"
+  analysis_stack_tif: "outputs/ice_analysis_stack.tif"
+  volume_csv: "outputs/ice_volume_estimates.csv"
+  rover_geojson: "outputs/rover_traverse.geojson"
+  dashboard_png: "outputs/dashboard.png"
 
